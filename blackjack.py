@@ -1,24 +1,33 @@
 from __future__ import annotations
 
-import curses
 from dataclasses import dataclass, field
+import os
 import random
 import sys
-import time
-from typing import Iterable
+import tkinter as tk
+from typing import Callable, Iterable
 
 SUITS = ("♠", "♥", "♦", "♣")
 RANKS = ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")
+RED_SUITS = {"♥", "♦"}
 FACE_CARD_VALUE = 10
 BLACKJACK = 21
 DEALER_STAND_VALUE = 17
 DEFAULT_BANKROLL = 100
 BLACKJACK_PAYOUT = 1.5
 RESHUFFLE_THRESHOLD = 15
-CARD_HEIGHT = 6
-TABLE_MIN_HEIGHT = 24
-TABLE_MIN_WIDTH = 70
-ANIMATION_DELAY = 0.14
+CANVAS_WIDTH = 980
+CANVAS_HEIGHT = 640
+CARD_WIDTH = 96
+CARD_HEIGHT = 136
+CARD_GAP = 28
+DECK_X = 80
+DECK_Y = 225
+PLAYER_Y = 390
+DEALER_Y = 120
+HAND_START_X = 280
+ANIMATION_FRAMES = 18
+ANIMATION_DELAY_MS = 16
 
 
 @dataclass(frozen=True)
@@ -37,28 +46,6 @@ class Card:
     @property
     def short_name(self) -> str:
         return f"{self.rank}{self.suit}"
-
-    def render(self, *, hidden: bool = False) -> list[str]:
-        if hidden:
-            return [
-                "┌───────┐",
-                "│░░░░░░░│",
-                "│░ BLACK│",
-                "│░ JACK░│",
-                "│░░░░░░░│",
-                "└───────┘",
-            ]
-
-        top_label = f"{self.rank:<2}"
-        bottom_label = f"{self.rank:>2}"
-        return [
-            "┌───────┐",
-            f"│{top_label:<7}│",
-            f"│{' ':^7}│",
-            f"│{self.suit:^7}│",
-            f"│{bottom_label:>7}│",
-            "└───────┘",
-        ]
 
     def __str__(self) -> str:
         return self.short_name
@@ -88,19 +75,9 @@ class Hand:
     def is_bust(self) -> bool:
         return self.value > BLACKJACK
 
-    def render(self, *, hide_first_card: bool = False) -> str:
-        if not self.cards:
-            return "(empty hand)"
-
-        rendered_cards = [
-            card.render(hidden=hide_first_card and index == 0)
-            for index, card in enumerate(self.cards)
-        ]
-        return "\n".join("  ".join(parts) for parts in zip(*rendered_cards))
-
-    def display(self, *, hide_first_card: bool = False) -> str:
-        if hide_first_card and self.cards:
-            visible_cards = ["??", *(str(card) for card in self.cards[1:])]
+    def display(self, *, hide_hole_card: bool = False) -> str:
+        if hide_hole_card and len(self.cards) >= 2:
+            visible_cards = [str(self.cards[0]), "??", *(str(card) for card in self.cards[2:])]
             return " ".join(visible_cards)
         return " ".join(str(card) for card in self.cards)
 
@@ -136,174 +113,14 @@ class RoundResult:
     bankroll_change: int
 
 
-class CursesRenderer:
-    def __init__(self, screen: curses.window, animation_delay: float = ANIMATION_DELAY) -> None:
-        self.screen = screen
-        self.animation_delay = animation_delay
-        curses.curs_set(0)
-        curses.noecho()
-        curses.cbreak()
-        self.screen.keypad(True)
-        self.screen.nodelay(False)
-
-    def pause(self, factor: float = 1.0) -> None:
-        time.sleep(self.animation_delay * factor)
-
-    def require_size(self) -> None:
-        height, width = self.screen.getmaxyx()
-        if height < TABLE_MIN_HEIGHT or width < TABLE_MIN_WIDTH:
-            raise RuntimeError(
-                f"Terminal too small for animation. Need at least {TABLE_MIN_WIDTH}x{TABLE_MIN_HEIGHT}."
-            )
-
-    def center_x(self, text: str) -> int:
-        _, width = self.screen.getmaxyx()
-        return max(0, (width - len(text)) // 2)
-
-    def safe_addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
-        height, width = self.screen.getmaxyx()
-        if y < 0 or y >= height or x >= width:
-            return
-        trimmed = text[: max(0, width - x - 1)]
-        if trimmed:
-            self.screen.addstr(y, x, trimmed, attr)
-
-    def draw_frame(self) -> None:
-        self.screen.erase()
-        height, width = self.screen.getmaxyx()
-        horizontal = "═" * (width - 2)
-        self.safe_addstr(0, 0, f"╔{horizontal}╗")
-        for row in range(1, height - 1):
-            self.safe_addstr(row, 0, "║")
-            self.safe_addstr(row, width - 1, "║")
-        self.safe_addstr(height - 1, 0, f"╚{horizontal}╝")
-
-    def draw_header(self, bankroll: int, bet: int | None) -> None:
-        _, width = self.screen.getmaxyx()
-        title = "♠ ♥ ♦ ♣  ANIMATED TERMINAL BLACKJACK  ♣ ♦ ♥ ♠"
-        details = f"Bankroll: ${bankroll}"
-        if bet is not None:
-            details += f"   Current bet: ${bet}"
-        self.safe_addstr(1, max(2, (width - len(title)) // 2), title, curses.A_BOLD)
-        self.safe_addstr(3, max(2, (width - len(details)) // 2), details)
-        self.safe_addstr(4, 2, "─" * (width - 4))
-
-    def draw_hand(self, y: int, label: str, hand: Hand, *, reveal: bool) -> int:
-        if reveal:
-            summary_value = str(hand.value)
-        elif len(hand.cards) > 1:
-            summary_value = f"showing {hand.cards[1].value}"
-        elif len(hand.cards) == 1:
-            summary_value = "showing ?"
-        else:
-            summary_value = "waiting..."
-        summary = f"{label} [{summary_value}]"
-        cards_line = f"Cards: {hand.display(hide_first_card=not reveal)}"
-        self.safe_addstr(y, 4, summary, curses.A_BOLD)
-        self.safe_addstr(y + 1, 4, cards_line)
-        for offset, line in enumerate(hand.render(hide_first_card=not reveal).splitlines()):
-            self.safe_addstr(y + 3 + offset, 6, line)
-        return y + 3 + CARD_HEIGHT
-
-    def draw_status(self, message: str, prompt: str | None = None) -> None:
-        height, width = self.screen.getmaxyx()
-        self.safe_addstr(height - 5, 2, "─" * (width - 4))
-        self.safe_addstr(height - 4, 4, message[: width - 8], curses.A_BOLD)
-        if prompt:
-            self.safe_addstr(height - 3, 4, prompt[: width - 8])
-
-    def render_table(
-        self,
-        player: Hand,
-        dealer: Hand,
-        *,
-        bankroll: int,
-        bet: int | None,
-        reveal_dealer: bool,
-        message: str,
-        prompt: str | None = None,
-    ) -> None:
-        self.require_size()
-        self.draw_frame()
-        self.draw_header(bankroll, bet)
-        next_y = self.draw_hand(6, "Dealer", dealer, reveal=reveal_dealer)
-        self.safe_addstr(next_y + 1, 2, "─" * (self.screen.getmaxyx()[1] - 4))
-        self.draw_hand(next_y + 3, "Player", player, reveal=True)
-        self.draw_status(message, prompt)
-        self.screen.refresh()
-
-    def splash(self) -> None:
-        self.require_size()
-        self.draw_frame()
-        title = "WELCOME TO ANIMATED TERMINAL BLACKJACK"
-        subtitle = "Watch cards deal onto the table and play with H / S / D."
-        hint = "Press any key to start."
-        self.safe_addstr(8, self.center_x(title), title, curses.A_BOLD)
-        self.safe_addstr(10, self.center_x(subtitle), subtitle)
-        self.safe_addstr(12, self.center_x(hint), hint)
-        self.screen.refresh()
-        self.screen.getch()
-
-    def prompt_bet(self, bankroll: int) -> int:
-        curses.echo()
-        while True:
-            self.draw_frame()
-            self.draw_header(bankroll, None)
-            self.draw_status("Place your bet for the next hand.", "Enter a whole number, or Q to quit: ")
-            height, _ = self.screen.getmaxyx()
-            self.safe_addstr(height - 2, 4, "Bet: $")
-            self.screen.refresh()
-            raw = self.screen.getstr(height - 2, 10, 10).decode("utf-8", errors="ignore").strip()
-            if raw.lower() in {"q", "quit", "exit"}:
-                curses.noecho()
-                raise SystemExit
-            if raw.isdigit() and 0 < int(raw) <= bankroll:
-                curses.noecho()
-                return int(raw)
-            self.draw_status("Invalid bet. It must be a whole number within your bankroll.")
-            self.screen.refresh()
-            self.pause(1.3)
-
-    def prompt_action(self, *, can_double: bool, player: Hand, dealer: Hand, bankroll: int, bet: int) -> str:
-        prompt = "Choose [H]it or [S]tand"
-        if can_double:
-            prompt += ", or [D]ouble down"
-        prompt += "."
-        self.render_table(
-            player,
-            dealer,
-            bankroll=bankroll,
-            bet=bet,
-            reveal_dealer=False,
-            message="Your move.",
-            prompt=prompt,
-        )
-        while True:
-            key = self.screen.getkey().lower()
-            if key in {"h", "s"}:
-                return key
-            if can_double and key == "d":
-                return key
-
-    def prompt_continue(self, bankroll: int) -> bool:
-        self.draw_frame()
-        self.draw_header(bankroll, None)
-        self.draw_status("Play another round?", "Press Y to continue, N to leave the table.")
-        self.screen.refresh()
-        while True:
-            key = self.screen.getkey().lower()
-            if key in {"y", "n"}:
-                return key == "y"
-
-    def announce(self, player: Hand, dealer: Hand, *, bankroll: int, bet: int | None, reveal_dealer: bool, message: str) -> None:
-        self.render_table(
-            player,
-            dealer,
-            bankroll=bankroll,
-            bet=bet,
-            reveal_dealer=reveal_dealer,
-            message=message,
-        )
+@dataclass
+class MovingCard:
+    card: Card
+    owner: str
+    index: int
+    hidden: bool
+    x: float
+    y: float
 
 
 class BlackjackGame:
@@ -321,110 +138,12 @@ class BlackjackGame:
             return RoundResult("Dealer has blackjack. You lose.", -bet)
         return None
 
-    def deal_opening_hands(self, renderer: CursesRenderer, bet: int) -> tuple[Hand, Hand]:
-        player = Hand()
-        dealer = Hand()
-        sequence = [
-            (player, "Dealing your first card..."),
-            (dealer, "Dealer draws a card..."),
-            (player, "Dealing your second card..."),
-            (dealer, "Dealer takes the hole card..."),
-        ]
-        for hand, message in sequence:
-            hand.add(self.deck.deal())
-            renderer.announce(
-                player,
-                dealer,
-                bankroll=self.bankroll,
-                bet=bet,
-                reveal_dealer=False,
-                message=message,
-            )
-            renderer.pause()
-        return player, dealer
-
-    def player_turn(self, renderer: CursesRenderer, player: Hand, dealer: Hand, bet: int) -> int:
-        while True:
-            can_double = len(player.cards) == 2 and self.bankroll >= bet * 2
-            choice = renderer.prompt_action(
-                can_double=can_double,
-                player=player,
-                dealer=dealer,
-                bankroll=self.bankroll,
-                bet=bet,
-            )
-
-            if choice == "h":
-                player.add(self.deck.deal())
-                renderer.announce(
-                    player,
-                    dealer,
-                    bankroll=self.bankroll,
-                    bet=bet,
-                    reveal_dealer=False,
-                    message="You take a hit.",
-                )
-                renderer.pause()
-                if player.is_bust:
-                    return bet
-            elif choice == "s":
-                renderer.announce(
-                    player,
-                    dealer,
-                    bankroll=self.bankroll,
-                    bet=bet,
-                    reveal_dealer=False,
-                    message="You stand.",
-                )
-                renderer.pause(0.8)
-                return bet
-            elif choice == "d" and can_double:
-                bet *= 2
-                player.add(self.deck.deal())
-                renderer.announce(
-                    player,
-                    dealer,
-                    bankroll=self.bankroll,
-                    bet=bet,
-                    reveal_dealer=False,
-                    message="Double down! One final card slides your way.",
-                )
-                renderer.pause(1.2)
-                return bet
-
-    def settle_round(
-        self,
-        player: Hand,
-        dealer: Hand,
-        bet: int,
-        renderer: CursesRenderer | None = None,
-    ) -> RoundResult:
+    def settle_round(self, player: Hand, dealer: Hand, bet: int) -> RoundResult:
         if player.is_bust:
             return RoundResult("You busted. Dealer wins.", -bet)
 
-        if renderer is not None:
-            renderer.announce(
-                player,
-                dealer,
-                bankroll=self.bankroll,
-                bet=bet,
-                reveal_dealer=True,
-                message="Dealer reveals the hole card.",
-            )
-            renderer.pause()
-
         while dealer.value < DEALER_STAND_VALUE:
             dealer.add(self.deck.deal())
-            if renderer is not None:
-                renderer.announce(
-                    player,
-                    dealer,
-                    bankroll=self.bankroll,
-                    bet=bet,
-                    reveal_dealer=True,
-                    message="Dealer hits...",
-                )
-                renderer.pause()
 
         if dealer.is_bust:
             return RoundResult(f"Dealer busts. You win ${bet}!", bet)
@@ -434,86 +153,394 @@ class BlackjackGame:
             return RoundResult("Dealer wins.", -bet)
         return RoundResult("Push! Your bet is returned.", 0)
 
-    def play_round(self, renderer: CursesRenderer) -> None:
-        if self.deck.needs_reshuffle():
-            self.deck.reset()
-            empty = Hand()
-            renderer.announce(
-                empty,
-                empty,
-                bankroll=self.bankroll,
-                bet=None,
-                reveal_dealer=True,
-                message="The shoe is low. Shuffling fresh cards...",
-            )
-            renderer.pause(1.5)
 
-        bet = renderer.prompt_bet(self.bankroll)
-        player, dealer = self.deal_opening_hands(renderer, bet)
+class AnimatedBlackjackApp:
+    def __init__(self, game: BlackjackGame) -> None:
+        self.game = game
+        self.root = tk.Tk()
+        self.root.title("Animated Blackjack")
+        self.root.geometry(f"{CANVAS_WIDTH}x{CANVAS_HEIGHT}")
+        self.root.minsize(CANVAS_WIDTH, CANVAS_HEIGHT)
+        self.root.configure(bg="#123524")
 
-        natural_result = self.resolve_natural_blackjack(player, dealer, bet)
-        if natural_result is None:
-            bet = self.player_turn(renderer, player, dealer, bet)
-            result = self.settle_round(player, dealer, bet, renderer)
+        self.bankroll_var = tk.StringVar()
+        self.bet_var = tk.StringVar(value="10")
+        self.status_var = tk.StringVar(value="Welcome! Choose your bet and click Deal Hand.")
+
+        self.current_bet = 10
+        self.player_hand = Hand()
+        self.dealer_hand = Hand()
+        self.reveal_dealer = False
+        self.round_active = False
+        self.awaiting_next_round = False
+        self.animation_active = False
+        self.moving_card: MovingCard | None = None
+
+        self.build_ui()
+        self.update_bankroll_label()
+        self.update_controls()
+        self.render_table()
+
+    def build_ui(self) -> None:
+        top_bar = tk.Frame(self.root, bg="#123524", pady=12)
+        top_bar.pack(fill="x")
+
+        tk.Label(
+            top_bar,
+            text="ANIMATED BLACKJACK",
+            font=("Helvetica", 20, "bold"),
+            fg="#f8f4e3",
+            bg="#123524",
+        ).pack(side="left", padx=18)
+
+        self.bankroll_label = tk.Label(
+            top_bar,
+            textvariable=self.bankroll_var,
+            font=("Helvetica", 14, "bold"),
+            fg="#f8f4e3",
+            bg="#123524",
+        )
+        self.bankroll_label.pack(side="left", padx=16)
+
+        bet_frame = tk.Frame(top_bar, bg="#123524")
+        bet_frame.pack(side="right", padx=18)
+        tk.Label(bet_frame, text="Bet", font=("Helvetica", 12, "bold"), fg="#f8f4e3", bg="#123524").pack(side="left")
+        self.bet_entry = tk.Entry(bet_frame, textvariable=self.bet_var, width=8, justify="center", font=("Helvetica", 12))
+        self.bet_entry.pack(side="left", padx=8)
+
+        self.deal_button = tk.Button(top_bar, text="Deal Hand", command=self.start_or_advance_round, width=12, font=("Helvetica", 12, "bold"))
+        self.deal_button.pack(side="right", padx=8)
+
+        self.canvas = tk.Canvas(
+            self.root,
+            width=CANVAS_WIDTH,
+            height=CANVAS_HEIGHT - 150,
+            bg="#1f6f43",
+            highlightthickness=0,
+        )
+        self.canvas.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        controls = tk.Frame(self.root, bg="#123524", pady=10)
+        controls.pack(fill="x")
+        self.hit_button = tk.Button(controls, text="Hit", command=self.player_hit, width=10, font=("Helvetica", 12, "bold"))
+        self.hit_button.pack(side="left", padx=12)
+        self.stand_button = tk.Button(controls, text="Stand", command=self.player_stand, width=10, font=("Helvetica", 12, "bold"))
+        self.stand_button.pack(side="left", padx=12)
+        self.double_button = tk.Button(controls, text="Double", command=self.player_double, width=10, font=("Helvetica", 12, "bold"))
+        self.double_button.pack(side="left", padx=12)
+        self.status_label = tk.Label(
+            controls,
+            textvariable=self.status_var,
+            font=("Helvetica", 12, "bold"),
+            fg="#f8f4e3",
+            bg="#123524",
+            anchor="w",
+        )
+        self.status_label.pack(side="left", fill="x", expand=True, padx=18)
+
+    def update_bankroll_label(self) -> None:
+        self.bankroll_var.set(f"Bankroll: ${self.game.bankroll}    Current bet: ${self.current_bet}")
+
+    def parse_bet(self) -> int | None:
+        raw_bet = self.bet_var.get().strip()
+        if not raw_bet.isdigit():
+            self.status_var.set("Enter a whole-number bet before dealing.")
+            return None
+        bet = int(raw_bet)
+        if bet <= 0:
+            self.status_var.set("Your bet must be greater than zero.")
+            return None
+        if bet > self.game.bankroll:
+            self.status_var.set("You cannot bet more than your bankroll.")
+            return None
+        return bet
+
+    def update_controls(self) -> None:
+        can_double = self.round_active and len(self.player_hand.cards) == 2 and self.game.bankroll >= self.current_bet * 2
+        action_state = tk.NORMAL if self.round_active and not self.animation_active else tk.DISABLED
+        self.hit_button.config(state=action_state)
+        self.stand_button.config(state=action_state)
+        self.double_button.config(state=tk.NORMAL if can_double and not self.animation_active else tk.DISABLED)
+
+        can_deal = not self.round_active and not self.animation_active and self.game.bankroll > 0
+        self.deal_button.config(state=tk.NORMAL if can_deal else tk.DISABLED)
+        self.deal_button.config(text="Next Round" if self.awaiting_next_round else "Deal Hand")
+        self.bet_entry.config(state=tk.NORMAL if can_deal else tk.DISABLED)
+
+    def hand_card_position(self, owner: str, index: int) -> tuple[int, int]:
+        x = HAND_START_X + index * (CARD_WIDTH + CARD_GAP)
+        y = PLAYER_Y if owner == "player" else DEALER_Y
+        return x, y
+
+    def set_status(self, message: str) -> None:
+        self.status_var.set(message)
+        self.render_table()
+
+    def start_or_advance_round(self) -> None:
+        if self.awaiting_next_round:
+            self.awaiting_next_round = False
+        self.start_round()
+
+    def start_round(self) -> None:
+        if self.animation_active or self.game.bankroll <= 0:
+            return
+
+        bet = self.parse_bet()
+        if bet is None:
+            self.update_controls()
+            self.render_table()
+            return
+
+        if self.game.deck.needs_reshuffle():
+            self.game.deck.reset()
+            self.status_var.set("Shoe was running low, so the deck was reshuffled.")
+
+        self.current_bet = bet
+        self.player_hand = Hand()
+        self.dealer_hand = Hand()
+        self.reveal_dealer = False
+        self.round_active = False
+        self.awaiting_next_round = False
+        self.moving_card = None
+
+        self.update_bankroll_label()
+        self.update_controls()
+        self.render_table()
+
+        sequence = [
+            ("player", False, "Dealing your first card..."),
+            ("dealer", False, "Dealer takes the up card..."),
+            ("player", False, "Dealing your second card..."),
+            ("dealer", True, "Dealer takes the hole card..."),
+        ]
+        self.deal_sequence(sequence, 0)
+
+    def deal_sequence(self, sequence: list[tuple[str, bool, str]], index: int) -> None:
+        if index >= len(sequence):
+            self.finish_opening_deal()
+            return
+
+        owner, hidden, message = sequence[index]
+        target_hand = self.player_hand if owner == "player" else self.dealer_hand
+        card = self.game.deck.deal()
+        target_hand.add(card)
+        card_index = len(target_hand.cards) - 1
+        self.status_var.set(message)
+        self.animate_card(
+            card=card,
+            owner=owner,
+            index=card_index,
+            hidden=hidden,
+            on_complete=lambda: self.deal_sequence(sequence, index + 1),
+        )
+
+    def finish_opening_deal(self) -> None:
+        result = self.game.resolve_natural_blackjack(self.player_hand, self.dealer_hand, self.current_bet)
+        if result is not None:
+            self.reveal_dealer = True
+            self.game.bankroll += result.bankroll_change
+            self.awaiting_next_round = True
+            self.status_var.set(f"{result.message} Review the table, then click Next Round.")
+            self.update_bankroll_label()
+            self.update_controls()
+            self.render_table()
+            return
+
+        self.round_active = True
+        self.status_var.set("Your move. Choose Hit, Stand, or Double.")
+        self.update_controls()
+        self.render_table()
+
+    def animate_card(
+        self,
+        *,
+        card: Card,
+        owner: str,
+        index: int,
+        hidden: bool,
+        on_complete: Callable[[], None],
+    ) -> None:
+        target_x, target_y = self.hand_card_position(owner, index)
+        self.animation_active = True
+
+        def step(frame: int) -> None:
+            progress = frame / ANIMATION_FRAMES
+            current_x = DECK_X + (target_x - DECK_X) * progress
+            current_y = DECK_Y + (target_y - DECK_Y) * progress
+            self.moving_card = MovingCard(card=card, owner=owner, index=index, hidden=hidden, x=current_x, y=current_y)
+            self.render_table()
+            if frame < ANIMATION_FRAMES:
+                self.root.after(ANIMATION_DELAY_MS, lambda: step(frame + 1))
+            else:
+                self.moving_card = None
+                self.animation_active = False
+                self.update_controls()
+                self.render_table()
+                on_complete()
+
+        step(0)
+
+    def player_hit(self) -> None:
+        if not self.round_active or self.animation_active:
+            return
+        self.round_active = False
+        self.update_controls()
+        card = self.game.deck.deal()
+        self.player_hand.add(card)
+        self.status_var.set("You take a hit.")
+        self.animate_card(
+            card=card,
+            owner="player",
+            index=len(self.player_hand.cards) - 1,
+            hidden=False,
+            on_complete=self.after_player_hit,
+        )
+
+    def after_player_hit(self) -> None:
+        if self.player_hand.is_bust:
+            self.reveal_dealer = True
+            self.finish_round(self.game.settle_round(self.player_hand, self.dealer_hand, self.current_bet))
+            return
+        self.round_active = True
+        self.status_var.set("Your move. Choose another action.")
+        self.update_controls()
+        self.render_table()
+
+    def player_stand(self) -> None:
+        if not self.round_active or self.animation_active:
+            return
+        self.round_active = False
+        self.reveal_dealer = True
+        self.status_var.set("Dealer reveals the hole card.")
+        self.update_controls()
+        self.render_table()
+        self.root.after(500, self.dealer_play_step)
+
+    def player_double(self) -> None:
+        if not self.round_active or self.animation_active:
+            return
+        if len(self.player_hand.cards) != 2 or self.game.bankroll < self.current_bet * 2:
+            self.status_var.set("You can only double on your first decision and within your bankroll.")
+            self.render_table()
+            return
+        self.round_active = False
+        self.current_bet *= 2
+        self.update_bankroll_label()
+        self.update_controls()
+        card = self.game.deck.deal()
+        self.player_hand.add(card)
+        self.status_var.set("Double down! One final card is on the way.")
+        self.animate_card(
+            card=card,
+            owner="player",
+            index=len(self.player_hand.cards) - 1,
+            hidden=False,
+            on_complete=self.after_double_down,
+        )
+
+    def after_double_down(self) -> None:
+        if self.player_hand.is_bust:
+            self.reveal_dealer = True
+            self.finish_round(self.game.settle_round(self.player_hand, self.dealer_hand, self.current_bet))
+            return
+        self.reveal_dealer = True
+        self.status_var.set("Dealer reveals the hole card.")
+        self.render_table()
+        self.root.after(500, self.dealer_play_step)
+
+    def dealer_play_step(self) -> None:
+        if self.dealer_hand.value >= DEALER_STAND_VALUE:
+            self.finish_round(self.game.settle_round(self.player_hand, self.dealer_hand, self.current_bet))
+            return
+
+        card = self.game.deck.deal()
+        self.dealer_hand.add(card)
+        self.status_var.set("Dealer hits...")
+        self.animate_card(
+            card=card,
+            owner="dealer",
+            index=len(self.dealer_hand.cards) - 1,
+            hidden=False,
+            on_complete=self.dealer_play_step,
+        )
+
+    def finish_round(self, result: RoundResult) -> None:
+        self.game.bankroll += result.bankroll_change
+        self.round_active = False
+        self.awaiting_next_round = self.game.bankroll > 0
+        self.reveal_dealer = True
+        if self.game.bankroll > 0:
+            self.status_var.set(f"{result.message} The result stays on screen until you click Next Round.")
         else:
-            renderer.announce(
-                player,
-                dealer,
-                bankroll=self.bankroll,
-                bet=bet,
-                reveal_dealer=True,
-                message="Natural blackjack check.",
-            )
-            renderer.pause(1.1)
-            result = natural_result
+            self.status_var.set(f"{result.message} You are out of chips.")
+        self.update_bankroll_label()
+        self.update_controls()
+        self.render_table()
 
-        self.bankroll += result.bankroll_change
-        renderer.announce(
-            player,
-            dealer,
-            bankroll=self.bankroll,
-            bet=bet,
-            reveal_dealer=True,
-            message=result.message,
-        )
-        renderer.pause(1.8)
+    def draw_card(self, x: float, y: float, card: Card, *, hidden: bool = False) -> None:
+        x1 = x + CARD_WIDTH
+        y1 = y + CARD_HEIGHT
+        if hidden:
+            self.canvas.create_rectangle(x, y, x1, y1, fill="#19376d", outline="#f6f1d1", width=3)
+            self.canvas.create_rectangle(x + 10, y + 10, x1 - 10, y1 - 10, outline="#f6f1d1", width=2)
+            self.canvas.create_text((x + x1) / 2, (y + y1) / 2 - 12, text="BLACK", fill="#f6f1d1", font=("Helvetica", 15, "bold"))
+            self.canvas.create_text((x + x1) / 2, (y + y1) / 2 + 12, text="JACK", fill="#f6f1d1", font=("Helvetica", 15, "bold"))
+            return
 
-    def run_animated(self, screen: curses.window) -> None:
-        renderer = CursesRenderer(screen)
-        renderer.splash()
+        suit_color = "#b31312" if card.suit in RED_SUITS else "#111111"
+        self.canvas.create_rectangle(x, y, x1, y1, fill="#fffdf7", outline="#222222", width=3)
+        self.canvas.create_text(x + 18, y + 18, text=card.rank, fill=suit_color, font=("Helvetica", 16, "bold"))
+        self.canvas.create_text((x + x1) / 2, (y + y1) / 2, text=card.suit, fill=suit_color, font=("Helvetica", 34, "bold"))
+        self.canvas.create_text(x1 - 18, y1 - 18, text=card.rank, fill=suit_color, font=("Helvetica", 16, "bold"))
 
-        while self.bankroll > 0:
-            self.play_round(renderer)
-            if self.bankroll <= 0:
-                empty = Hand()
-                renderer.announce(
-                    empty,
-                    empty,
-                    bankroll=self.bankroll,
-                    bet=None,
-                    reveal_dealer=True,
-                    message="You're out of money. Game over!",
-                )
-                renderer.pause(2.0)
-                break
-            if not renderer.prompt_continue(self.bankroll):
-                break
+    def draw_hand(self, owner: str, hand: Hand) -> None:
+        y = PLAYER_Y if owner == "player" else DEALER_Y
+        title_y = y - 36
+        if owner == "dealer":
+            if self.reveal_dealer:
+                value_text = str(hand.value)
+            elif hand.cards:
+                value_text = f"showing {hand.cards[0].value}"
+            else:
+                value_text = "waiting..."
+            heading = f"Dealer [{value_text}]"
+            cards_text = hand.display(hide_hole_card=not self.reveal_dealer)
+        else:
+            heading = f"Player [{hand.value if hand.cards else 0}]"
+            cards_text = hand.display()
 
-        empty = Hand()
-        renderer.announce(
-            empty,
-            empty,
-            bankroll=self.bankroll,
-            bet=None,
-            reveal_dealer=True,
-            message=f"Thanks for playing! You leave with ${self.bankroll}.",
-        )
-        renderer.pause(2.0)
+        self.canvas.create_text(HAND_START_X, title_y, text=heading, fill="#f8f4e3", font=("Helvetica", 18, "bold"), anchor="w")
+        self.canvas.create_text(HAND_START_X, title_y + 24, text=cards_text or "(empty hand)", fill="#d7f9e9", font=("Helvetica", 12), anchor="w")
 
-    def play(self) -> None:
-        if not sys.stdin.isatty() or not sys.stdout.isatty():
-            raise RuntimeError("Animated mode requires an interactive terminal.")
-        curses.wrapper(self.run_animated)
+        for index, card in enumerate(hand.cards):
+            if self.moving_card is not None and self.moving_card.owner == owner and self.moving_card.index == index:
+                continue
+            x, card_y = self.hand_card_position(owner, index)
+            hidden = owner == "dealer" and not self.reveal_dealer and index == 1
+            self.draw_card(x, card_y, card, hidden=hidden)
+
+    def render_table(self) -> None:
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, fill="#1f6f43", outline="")
+        self.canvas.create_oval(190, 40, 920, 600, outline="#d9b95b", width=4)
+        self.canvas.create_text(CANVAS_WIDTH / 2, 34, text="BLACKJACK TABLE", fill="#f6e7b7", font=("Helvetica", 22, "bold"))
+
+        self.canvas.create_rectangle(DECK_X, DECK_Y, DECK_X + CARD_WIDTH, DECK_Y + CARD_HEIGHT, fill="#7f1020", outline="#f6f1d1", width=3)
+        self.canvas.create_text(DECK_X + CARD_WIDTH / 2, DECK_Y + CARD_HEIGHT / 2 - 10, text="DECK", fill="#f6f1d1", font=("Helvetica", 16, "bold"))
+        self.canvas.create_text(DECK_X + CARD_WIDTH / 2, DECK_Y + CARD_HEIGHT / 2 + 16, text=str(len(self.game.deck.cards)), fill="#f6f1d1", font=("Helvetica", 12, "bold"))
+
+        self.draw_hand("dealer", self.dealer_hand)
+        self.draw_hand("player", self.player_hand)
+
+        if self.moving_card is not None:
+            self.draw_card(self.moving_card.x, self.moving_card.y, self.moving_card.card, hidden=self.moving_card.hidden)
+
+        self.canvas.create_rectangle(24, 448, 250, 540, fill="#123524", outline="#f6e7b7", width=3)
+        self.canvas.create_text(40, 474, text="Round status", fill="#f8f4e3", font=("Helvetica", 15, "bold"), anchor="w")
+        self.canvas.create_text(40, 508, text=self.status_var.get(), fill="#e8fff5", font=("Helvetica", 11, "bold"), anchor="w", width=190)
+
+    def run(self) -> None:
+        self.root.mainloop()
 
 
 def simulate_hand(cards: Iterable[tuple[str, str]]) -> Hand:
@@ -521,9 +548,15 @@ def simulate_hand(cards: Iterable[tuple[str, str]]) -> Hand:
     return Hand([Card(rank, suit) for rank, suit in cards])
 
 
+def launch_game() -> None:
+    if sys.platform != "win32" and not os.environ.get("DISPLAY"):
+        raise RuntimeError("Animated mode requires a graphical desktop session with DISPLAY available.")
+    AnimatedBlackjackApp(BlackjackGame()).run()
+
+
 if __name__ == "__main__":
     try:
-        BlackjackGame().play()
+        launch_game()
     except (KeyboardInterrupt, EOFError, SystemExit):
         print("\nGoodbye!")
     except RuntimeError as error:

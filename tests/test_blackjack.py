@@ -18,14 +18,12 @@ class HandValueTests(unittest.TestCase):
         self.assertFalse(hand.is_blackjack)
         self.assertEqual(hand.value, 21)
 
-    def test_hidden_hand_render_masks_first_card(self) -> None:
-        hand = simulate_hand([("A", "♠"), ("K", "♦")])
-        rendered = hand.render(hide_first_card=True)
-        self.assertIn("BLACK", rendered)
-        self.assertIn("K", rendered)
+    def test_display_hides_dealer_hole_card(self) -> None:
+        hand = simulate_hand([("A", "♠"), ("K", "♦"), ("3", "♣")])
+        self.assertEqual(hand.display(hide_hole_card=True), "A♠ ?? 3♣")
 
-    def test_empty_hand_render_is_placeholder(self) -> None:
-        self.assertEqual(Hand().render(), "(empty hand)")
+    def test_empty_hand_display_is_empty_string(self) -> None:
+        self.assertEqual(Hand().display(), "")
 
 
 class DeckTests(unittest.TestCase):
@@ -39,11 +37,6 @@ class DeckTests(unittest.TestCase):
 
     def test_card_string_representation(self) -> None:
         self.assertEqual(str(Card("Q", "♥")), "Q♥")
-
-    def test_card_render_contains_rank_and_suit(self) -> None:
-        rendered = "\n".join(Card("Q", "♥").render())
-        self.assertIn("Q", rendered)
-        self.assertIn("♥", rendered)
 
     def test_reshuffle_threshold_detected(self) -> None:
         deck = Deck(rng=random.Random(0))
