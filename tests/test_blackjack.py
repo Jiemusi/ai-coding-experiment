@@ -18,6 +18,12 @@ class HandValueTests(unittest.TestCase):
         self.assertFalse(hand.is_blackjack)
         self.assertEqual(hand.value, 21)
 
+    def test_hidden_hand_render_masks_first_card(self) -> None:
+        hand = simulate_hand([("A", "♠"), ("K", "♦")])
+        rendered = hand.render(hide_first_card=True)
+        self.assertIn("BLACK", rendered)
+        self.assertIn("K", rendered)
+
 
 class DeckTests(unittest.TestCase):
     def test_deck_reset_restores_full_size(self) -> None:
@@ -30,6 +36,11 @@ class DeckTests(unittest.TestCase):
 
     def test_card_string_representation(self) -> None:
         self.assertEqual(str(Card("Q", "♥")), "Q♥")
+
+    def test_card_render_contains_rank_and_suit(self) -> None:
+        rendered = "\n".join(Card("Q", "♥").render())
+        self.assertIn("Q", rendered)
+        self.assertIn("♥", rendered)
 
 
 class PayoutTests(unittest.TestCase):

@@ -12,6 +12,7 @@ DEALER_STAND_VALUE = 17
 DEFAULT_BANKROLL = 100
 BLACKJACK_PAYOUT = 1.5
 RESHUFFLE_THRESHOLD = 15
+TABLE_WIDTH = 66
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,34 @@ class Card:
             return 11
         return int(self.rank)
 
-    def __str__(self) -> str:
+    @property
+    def short_name(self) -> str:
         return f"{self.rank}{self.suit}"
+
+    def render(self, *, hidden: bool = False) -> list[str]:
+        if hidden:
+            return [
+                "┌───────┐",
+                "│░░░░░░░│",
+                "│░ BLACK│",
+                "│░ JACK░│",
+                "│░░░░░░░│",
+                "└───────┘",
+            ]
+
+        top_label = f"{self.rank:<2}"
+        bottom_label = f"{self.rank:>2}"
+        return [
+            "┌───────┐",
+            f"│{top_label:<7}│",
+            f"│{' ':^7}│",
+            f"│{self.suit:^7}│",
+            f"│{bottom_label:>7}│",
+            "└───────┘",
+        ]
+
+    def __str__(self) -> str:
+        return self.short_name
 
 
 @dataclass
@@ -54,6 +81,16 @@ class Hand:
     @property
     def is_bust(self) -> bool:
         return self.value > BLACKJACK
+
+    def render(self, *, hide_first_card: bool = False) -> str:
+        if not self.cards:
+            return "(empty hand)"
+
+        rendered_cards = [
+            card.render(hidden=hide_first_card and index == 0)
+            for index, card in enumerate(self.cards)
+        ]
+        return "\n".join("  ".join(parts) for parts in zip(*rendered_cards))
 
     def display(self, *, hide_first_card: bool = False) -> str:
         if hide_first_card and self.cards:
@@ -85,7 +122,9 @@ class Deck:
 
     def ensure_cards(self) -> None:
         if len(self.cards) < RESHUFFLE_THRESHOLD:
-            print("\nNot enough cards left in the shoe. Reshuffling...\n")
+            print(f"\n{'=' * TABLE_WIDTH}")
+            print(center_text("Not enough cards left in the shoe. Reshuffling..."))
+            print(f"{'=' * TABLE_WIDTH}\n")
             self.reset()
 
 
@@ -95,14 +134,25 @@ class RoundResult:
     bankroll_change: int
 
 
+def center_text(text: str, fill: str = " ") -> str:
+    return text.center(TABLE_WIDTH, fill)
+
+
+def divider(char: str = "═") -> str:
+    return char * TABLE_WIDTH
+
+
 class BlackjackGame:
     def __init__(self, bankroll: int = DEFAULT_BANKROLL) -> None:
         self.bankroll = bankroll
         self.deck = Deck()
 
     def take_bet(self) -> int:
+        print(divider("═"))
+        print(center_text("PLACE YOUR BET"))
+        print(divider("═"))
         while True:
-            raw_bet = input(f"You have ${self.bankroll}. Enter your bet: $").strip()
+            raw_bet = input(f"Bankroll ${self.bankroll} | Enter your bet: $").strip()
             if raw_bet.lower() in {"q", "quit", "exit"}:
                 raise SystemExit
             if not raw_bet.isdigit():
@@ -121,16 +171,24 @@ class BlackjackGame:
         dealer = Hand([self.deck.deal(), self.deck.deal()])
         return player, dealer
 
-    def show_table(self, player: Hand, dealer: Hand, *, reveal_dealer: bool = False) -> None:
-        print("\n--- Table ---")
-        print(f"Dealer: {dealer.display(hide_first_card=not reveal_dealer)}", end="")
-        if reveal_dealer:
-            print(f"  (value: {dealer.value})")
-        else:
-            visible_value = dealer.cards[1].value if len(dealer.cards) > 1 else 0
-            print(f"  (showing: {visible_value})")
-        print(f"Player: {player.display()}  (value: {player.value})")
-        print("-------------")
+    def show_table(self, player: Hand, dealer: Hand, *, reveal_dealer: bool = False, bet: int | None = None) -> None:
+        dealer_value = str(dealer.value) if reveal_dealer else f"showing {dealer.cards[1].value}"
+        bet_text = f" | Current bet: ${bet}" if bet is not None else ""
+
+        print(f"\n╔{divider('═')}╗")
+        print(f"║{center_text('♠ ♥ ♦ ♣  TERMINAL BLACKJACK  ♣ ♦ ♥ ♠')}║")
+        print(f"║{center_text(f'Bankroll: ${self.bankroll}{bet_text}')}║")
+        print(f"╠{divider('═')}╣")
+        print(f"║ {('Dealer hand [' + dealer_value + ']'):<63}║")
+        print(f"║ {('Cards: ' + dealer.display(hide_first_card=not reveal_dealer)):<63}║")
+        for line in dealer.render(hide_first_card=not reveal_dealer).splitlines():
+            print(f"║ {line:<63}║")
+        print(f"╠{divider('─')}╣")
+        print(f"║ {('Player hand [' + str(player.value) + ']'):<63}║")
+        print(f"║ {('Cards: ' + player.display()):<63}║")
+        for line in player.render().splitlines():
+            print(f"║ {line:<63}║")
+        print(f"╚{divider('═')}╝")
 
     def resolve_natural_blackjack(self, player: Hand, dealer: Hand, bet: int) -> RoundResult | None:
         if player.is_blackjack and dealer.is_blackjack:
@@ -145,7 +203,7 @@ class BlackjackGame:
     def player_turn(self, player: Hand, dealer: Hand, bet: int) -> tuple[Hand, int, bool]:
         doubled_down = False
         while True:
-            self.show_table(player, dealer)
+            self.show_table(player, dealer, bet=bet)
             options = ["[H]it", "[S]tand"]
             can_double = len(player.cards) == 2 and self.bankroll >= bet * 2
             if can_double:
@@ -155,7 +213,7 @@ class BlackjackGame:
             if choice in {"h", "hit"}:
                 player.add(self.deck.deal())
                 if player.is_bust:
-                    self.show_table(player, dealer)
+                    self.show_table(player, dealer, bet=bet)
                     return player, bet, doubled_down
             elif choice in {"s", "stand"}:
                 return player, bet, doubled_down
@@ -163,7 +221,7 @@ class BlackjackGame:
                 bet *= 2
                 player.add(self.deck.deal())
                 doubled_down = True
-                self.show_table(player, dealer)
+                self.show_table(player, dealer, bet=bet)
                 return player, bet, doubled_down
             else:
                 print("Invalid choice. Please enter H, S, or D when available.")
@@ -178,7 +236,7 @@ class BlackjackGame:
             return RoundResult("You busted. Dealer wins.", -bet)
 
         self.dealer_turn(dealer)
-        self.show_table(player, dealer, reveal_dealer=True)
+        self.show_table(player, dealer, reveal_dealer=True, bet=bet)
 
         if dealer.is_bust:
             return RoundResult(f"Dealer busts. You win ${bet}!", bet)
@@ -193,35 +251,41 @@ class BlackjackGame:
         bet = self.take_bet()
         player, dealer = self.initial_deal()
 
-        self.show_table(player, dealer)
+        self.show_table(player, dealer, bet=bet)
         natural_result = self.resolve_natural_blackjack(player, dealer, bet)
         if natural_result is None:
             player, final_bet, _ = self.player_turn(player, dealer, bet)
             result = self.settle_round(player, dealer, final_bet)
         else:
-            self.show_table(player, dealer, reveal_dealer=True)
+            self.show_table(player, dealer, reveal_dealer=True, bet=bet)
             result = natural_result
 
         self.bankroll += result.bankroll_change
-        print(result.message)
-        print(f"Bankroll: ${self.bankroll}\n")
+        print(divider("═"))
+        print(center_text(result.message))
+        print(center_text(f"Bankroll: ${self.bankroll}"))
+        print(divider("═"))
+        print()
 
     def play(self) -> None:
-        print("Welcome to Terminal Blackjack!")
-        print("Try to get as close to 21 as possible without going over.")
-        print("Enter 'q' at any bet prompt to quit.\n")
+        print(divider("═"))
+        print(center_text("WELCOME TO TERMINAL BLACKJACK"))
+        print(center_text("Try to get as close to 21 as possible without busting."))
+        print(center_text("Enter 'q' at any bet prompt to quit."))
+        print(divider("═"))
+        print()
 
         while self.bankroll > 0:
             self.play_round()
             if self.bankroll <= 0:
-                print("You're out of money. Game over!")
+                print(center_text("You're out of money. Game over!"))
                 break
 
             again = input("Play another round? [Y/n]: ").strip().lower()
             if again in {"n", "no", "q", "quit"}:
                 break
 
-        print(f"Thanks for playing! You leave with ${self.bankroll}.")
+        print(center_text(f"Thanks for playing! You leave with ${self.bankroll}."))
 
 
 def simulate_hand(cards: Iterable[tuple[str, str]]) -> Hand:
