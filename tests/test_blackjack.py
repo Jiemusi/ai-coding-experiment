@@ -1,7 +1,7 @@
 import random
 import unittest
 
-from blackjack import BlackjackGame, Card, Deck, simulate_hand
+from blackjack import BlackjackGame, Card, Deck, Hand, simulate_hand
 
 
 class HandValueTests(unittest.TestCase):
@@ -24,6 +24,9 @@ class HandValueTests(unittest.TestCase):
         self.assertIn("BLACK", rendered)
         self.assertIn("K", rendered)
 
+    def test_empty_hand_render_is_placeholder(self) -> None:
+        self.assertEqual(Hand().render(), "(empty hand)")
+
 
 class DeckTests(unittest.TestCase):
     def test_deck_reset_restores_full_size(self) -> None:
@@ -41,6 +44,11 @@ class DeckTests(unittest.TestCase):
         rendered = "\n".join(Card("Q", "♥").render())
         self.assertIn("Q", rendered)
         self.assertIn("♥", rendered)
+
+    def test_reshuffle_threshold_detected(self) -> None:
+        deck = Deck(rng=random.Random(0))
+        deck.cards = deck.cards[:10]
+        self.assertTrue(deck.needs_reshuffle())
 
 
 class PayoutTests(unittest.TestCase):
